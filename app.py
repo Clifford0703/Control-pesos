@@ -25,7 +25,7 @@ MAPA_DESC = {f"{item['sku']} - {item['descripcion']}": item["descripcion"] for i
 
 COLUMNAS = [
     "Fecha", "Hora_Registro", "SKU", "Descripcion", "Seccion",
-    "Lote_Guia", "Peso_Teorico_kg", "Peso_Real_kg", 
+    "Peso_Guia_kg", "Peso_Bascula_kg", 
     "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
 ]
 
@@ -34,13 +34,13 @@ def cargar_datos():
         return pd.read_csv(DATA_FILE, sep=";")
     return pd.DataFrame(columns=COLUMNAS)
 
-def guardar_pesaje(fecha_seleccionada, prod_str, lote, peso_teorico, peso_real, obs):
+def guardar_pesaje(fecha_sel, prod_str, peso_guia, peso_bascula, obs):
     sku = MAPA_SKU[prod_str]
     descripcion = MAPA_DESC[prod_str]
     seccion = MAPA_SECCION[prod_str]
     
-    dif_kg = round(peso_real - peso_teorico, 2)
-    pct = round((dif_kg / peso_teorico) * 100, 2)
+    dif_kg = round(peso_bascula - peso_guia, 2)
+    pct = round((dif_kg / peso_guia) * 100, 2)
     
     if pct < -1.5:
         estado = "Merma / Faltante"
@@ -50,14 +50,13 @@ def guardar_pesaje(fecha_seleccionada, prod_str, lote, peso_teorico, peso_real, 
         estado = "Conforme"
 
     nuevo_registro = pd.DataFrame([{
-        "Fecha": fecha_seleccionada.strftime("%Y-%m-%d"),
+        "Fecha": fecha_sel.strftime("%Y-%m-%d"),
         "Hora_Registro": datetime.now().strftime("%H:%M:%S"),
         "SKU": sku,
         "Descripcion": descripcion,
         "Seccion": seccion,
-        "Lote_Guia": lote.strip() if lote.strip() else "S/L",
-        "Peso_Teorico_kg": round(float(peso_teorico), 2),
-        "Peso_Real_kg": round(float(peso_real), 2),
+        "Peso_Guia_kg": round(float(peso_guia), 2),
+        "Peso_Bascula_kg": round(float(peso_bascula), 2),
         "Diferencia_kg": dif_kg,
         "Variacion_Pct": pct,
         "Estado": estado,
@@ -105,64 +104,58 @@ col_form, col_tabla = st.columns([1, 2], gap="large")
 with col_form:
     st.subheader("📝 Registrar Pesaje")
     
-    with st.form("form_registro", clear_on_submit=False):
-        # Fecha por defecto: hoy, pero editable haciendo clic en el calendario
-        fecha_ingreso = st.date_input(
-            "Fecha de Ingreso:",
-            value=date.today(),
-            format="YYYY-MM-DD"
-        )
+    with st.form("form_registro", clear_on_submit=True):
+        # Fecha predeterminada de hoy pero editable
+        fecha_ingreso = st.date_input("Fecha de Ingreso:", value=date.today())
         
+        # Desplegable SKU - Descripción
         producto_sel = st.selectbox(
             "Seleccione Producto (SKU - Descripción):", 
             options=OPCIONES_PRODUCTO
         )
-        
         st.caption(f"📂 **Sección:** {MAPA_SECCION[producto_sel]}")
-        
-        lote_guia = st.text_input("N° Lote / Guía de Remisión:", placeholder="Ej: GR-40892")
         
         c1, c2 = st.columns(2)
         with c1:
             peso_guia = st.number_input("Peso Guía (kg):", min_value=0.0, step=0.1, format="%.2f")
         with c2:
-            peso_real = st.number_input("Peso Báscula (kg):", min_value=0.0, step=0.1, format="%.2f")
+            peso_bascula = st.number_input("Peso Báscula (kg):", min_value=0.0, step=0.1, format="%.2f")
             
-        notas = st.text_input("Observaciones:", placeholder="Opcional")
+        observaciones = st.text_input("Observaciones:", placeholder="Opcional")
         
         btn_guardar = st.form_submit_button("💾 Guardar Ingreso", use_container_width=True)
         
         if btn_guardar:
-            if peso_guia <= 0 or peso_real <= 0:
-                st.error("⚠️ Ingrese pesos mayores a 0.")
+            if peso_guia <= 0 or peso_bascula <= 0:
+                st.error("⚠️ Tanto el Peso Guía como el Peso Báscula deben ser mayores a 0.")
             else:
-                guardar_pesaje(fecha_ingreso, producto_sel, lote_guia, peso_guia, peso_real, notas)
-                dif = peso_real - peso_guia
+                guardar_pesaje(fecha_ingreso, producto_sel, peso_guia, peso_bascula, observaciones)
+                dif = peso_bascula - peso_guia
                 pct = (dif / peso_guia) * 100
-                st.success(f"Guardado exitosamente: {producto_sel} | Dif: {dif:+.2f} kg ({pct:+.2f}%)")
+                st.success(f"Guardado: {producto_sel} | Dif: {dif:+.2f} kg ({pct:+.2f}%)")
                 st.rerun()
 
 with col_tabla:
     st.subheader("📋 Histórico Acumulado")
     
     if not df_historico.empty:
-        total_teo = df_historico["Peso_Teorico_kg"].sum()
-        total_real = df_historico["Peso_Real_kg"].sum()
-        dif_neta = total_real - total_teo
-        pct_neta = (dif_neta / total_teo) * 100
+        total_guia = df_historico["Peso_Guia_kg"].sum()
+        total_bascula = df_historico["Peso_Bascula_kg"].sum()
+        dif_neta = total_bascula - total_guia
+        pct_neta = (dif_neta / total_guia) * 100
 
         m1, m2, m3 = st.columns(3)
         m1.metric("Ingresos Registrados", f"{len(df_historico)}")
-        m2.metric("Total Báscula", f"{total_real:,.2f} kg")
+        m2.metric("Total Báscula", f"{total_bascula:,.2f} kg")
         m3.metric("Diferencia Neta Total", f"{dif_neta:+,.2f} kg", delta=f"{pct_neta:+.2f}%", delta_color="inverse")
 
         st.dataframe(
             df_historico.iloc[::-1][[
-                "Fecha", "SKU", "Descripcion", "Seccion", "Lote_Guia", 
-                "Peso_Teorico_kg", "Peso_Real_kg", "Diferencia_kg", "Variacion_Pct", "Estado"
+                "Fecha", "SKU", "Descripcion", "Seccion", 
+                "Peso_Guia_kg", "Peso_Bascula_kg", "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
             ]],
             use_container_width=True,
             hide_index=True
         )
     else:
-        st.info("No hay pesajes registrados todavía.")
+        st.info("No hay pesajes registrados todavía. Utilice el formulario de la izquierda.")
