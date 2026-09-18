@@ -27,9 +27,10 @@ MAPA_SECCION = {f"{item['sku']} - {item['descripcion']}": item["seccion"] for it
 MAPA_SKU = {f"{item['sku']} - {item['descripcion']}": item["sku"] for item in CATALOGO}
 MAPA_DESC = {f"{item['sku']} - {item['descripcion']}": item["descripcion"] for item in CATALOGO}
 
-COLUMNAS = [
+# Columnas estándar por orden de índice exacto (A=0, B=1, ... H=7, etc.)
+COLUMNAS_ESTANDAR = [
     "Fecha", "Hora_Registro", "Nombre", "SKU", "Descripcion", "Seccion",
-    "Peso_Guia_kg", "Peso_Bascula_k", "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
+    "Peso_Guia_kg", "Peso_Bascula_kg", "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
 ]
 
 # ==============================================================================
@@ -41,22 +42,44 @@ def cargar_datos():
         if r.status_code == 200:
             filas = r.json()
             if len(filas) > 1:
-                df = pd.DataFrame(filas[1:], columns=filas[0])
-                for col in COLUMNAS:
-                    if col not in df.columns:
-                        df[col] = None
-                return df[COLUMNAS]
-    except Exception:
-        pass
-    return pd.DataFrame(columns=COLUMNAS)
+                # Extraer únicamente los registros ignorando el nombre de texto de los encabezados
+                datos = filas[1:]
+                df = pd.DataFrame(datos)
+                
+                # Completar columnas si faltaran por celdas vacías a la derecha
+                while df.shape[1] < len(COLUMNAS_ESTANDAR):
+                    df[df.shape[1]] = ""
+                
+                # Mapeo posicional directo: la columna H (índice 7) siempre es Peso_Bascula_kg
+                df = df.iloc[:, :len(COLUMNAS_ESTANDAR)]
+                df.columns = COLUMNAS_ESTANDAR
+
+                # Conversión numérica limpia de punto o coma decimal
+                for num_col in ["Peso_Guia_kg", "Peso_Bascula_kg", "Diferencia_kg", "Variacion_Pct"]:
+                    df[num_col] = (
+                        df[num_col]
+                        .astype(str)
+                        .str.replace(",", ".", regex=False)
+                        .str.strip()
+                    )
+                    df[num_col] = pd.to_numeric(df[num_col], errors="coerce").fillna(0.0)
+
+                return df
+    except Exception as e:
+        st.warning(f"Aviso de sincronización: {e}")
+        
+    return pd.DataFrame(columns=COLUMNAS_ESTANDAR)
 
 def guardar_pesaje(fecha_sel, nombre_op, prod_str, peso_guia, peso_bascula, obs):
     sku = MAPA_SKU[prod_str]
     descripcion = MAPA_DESC[prod_str]
     seccion = MAPA_SECCION[prod_str]
     
-    dif_kg = round(peso_bascula - peso_guia, 2)
-    pct = round((dif_kg / peso_guia) * 100, 2)
+    p_guia = float(peso_guia)
+    p_bascula = float(peso_bascula)
+    
+    dif_kg = round(p_bascula - p_guia, 2)
+    pct = round((dif_kg / p_guia) * 100, 2)
     
     if pct < -1.5:
         estado = "Merma / Faltante"
@@ -72,15 +95,20 @@ def guardar_pesaje(fecha_sel, nombre_op, prod_str, peso_guia, peso_bascula, obs)
         "SKU": sku,
         "Descripcion": descripcion,
         "Seccion": seccion,
-        "Peso_Guia_kg": round(float(peso_guia), 2),
-        "Peso_Bascula_k": round(float(peso_bascula), 2),
+        "Peso_Guia_kg": p_guia,
+        "Peso_Bascula_k": p_bascula,
         "Diferencia_kg": dif_kg,
         "Variacion_Pct": pct,
         "Estado": estado,
         "Observaciones": obs.strip() if obs else ""
     }
     
-    response = requests.post(URL_APPS_SCRIPT, data=json.dumps(payload), timeout=10)
+    response = requests.post(
+        URL_APPS_SCRIPT, 
+        data=json.dumps(payload), 
+        headers={"Content-Type": "application/json"},
+        timeout=10
+    )
     return response.status_code == 200
 
 # ==============================================================================
@@ -95,6 +123,7 @@ with col_titulo:
 
 df_historico = cargar_datos()
 
+# Botón de exportación en la esquina superior derecha
 with col_export:
     st.write("")
     if not df_historico.empty:
@@ -123,39 +152,35 @@ with col_form:
         
         c1, c2 = st.columns(2)
         with c1:
-            peso_guia = st.number_input("Peso Guía (kg):", min_value=0.0, step=0.1, format="%.2f")
+            peso_guia = st.number_input("Peso Guía (kg):", min_value=0.0, step=0.5, format="%.2f")
         with c2:
-            peso_bascula = st.number_input("Peso Báscula (kg):", min_value=0.0, step=0.1, format="%.2f")
+            peso_bascula = st.number_input("Peso Báscula (kg):", min_value=0.0, step=0.5, format="%.2f")
             
         observaciones = st.text_input("Observaciones:", placeholder="Opcional")
         btn_guardar = st.form_submit_button("💾 Guardar Ingreso", use_container_width=True)
         
         if btn_guardar:
             if not nombre_personal.strip():
-                st.error("⚠️ Por favor ingrese el nombre del operador.")
+                st.error("⚠️ Ingrese el nombre del operador.")
             elif peso_guia <= 0 or peso_bascula <= 0:
                 st.error("⚠️ Ingrese pesos válidos mayores a 0.")
             else:
-                with st.spinner("Guardando en Google Sheets..."):
+                with st.spinner("Guardando en la base de datos..."):
                     ok = guardar_pesaje(fecha_ingreso, nombre_personal, producto_sel, peso_guia, peso_bascula, observaciones)
                 if ok:
                     dif = peso_bascula - peso_guia
                     pct = (dif / peso_guia) * 100
-                    st.success(f"Guardado exitosamente: {producto_sel} | Dif: {dif:+.2f} kg ({pct:+.2f}%)")
+                    st.success(f"Guardado: {producto_sel} | Báscula: {peso_bascula:.2f} kg | Dif: {dif:+.2f} kg ({pct:+.2f}%)")
                     st.rerun()
                 else:
-                    st.error("No se pudo conectar con la hoja. Verifica la implementación de Apps Script.")
+                    st.error("Error al conectar con Google Sheets.")
 
 with col_tabla:
     st.subheader("📋 Histórico Acumulado")
     
     if not df_historico.empty:
-        df_historico["Peso_Guia_kg"] = pd.to_numeric(df_historico["Peso_Guia_kg"], errors="coerce").fillna(0)
-        df_historico["Peso_Bascula_k"] = pd.to_numeric(df_historico["Peso_Bascula_k"], errors="coerce").fillna(0)
-        df_historico["Diferencia_kg"] = pd.to_numeric(df_historico["Diferencia_kg"], errors="coerce").fillna(0)
-
         total_guia = df_historico["Peso_Guia_kg"].sum()
-        total_bascula = df_historico["Peso_Bascula_k"].sum()
+        total_bascula = df_historico["Peso_Bascula_kg"].sum()
         dif_neta = total_bascula - total_guia
         pct_neta = (dif_neta / total_guia) * 100 if total_guia > 0 else 0
 
@@ -164,8 +189,15 @@ with col_tabla:
         m2.metric("Total Báscula", f"{total_bascula:,.2f} kg")
         m3.metric("Diferencia Neta Acumulada", f"{dif_neta:+,.2f} kg", delta=f"{pct_neta:+.2f}%", delta_color="inverse")
 
+        # Formateo visual para la tabla en pantalla
+        df_mostrar = df_historico.copy()
+        df_mostrar["Peso_Guia_kg"] = df_mostrar["Peso_Guia_kg"].map("{:,.2f}".format)
+        df_mostrar["Peso_Bascula_kg"] = df_mostrar["Peso_Bascula_kg"].map("{:,.2f}".format)
+        df_mostrar["Diferencia_kg"] = df_mostrar["Diferencia_kg"].map("{:+,.2f}".format)
+        df_mostrar["Variacion_Pct"] = df_mostrar["Variacion_Pct"].map("{:+.2f}%".format)
+
         st.dataframe(
-            df_historico.iloc[::-1],
+            df_mostrar.iloc[::-1],
             use_container_width=True,
             hide_index=True
         )
