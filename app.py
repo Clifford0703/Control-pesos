@@ -1,7 +1,13 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-from streamlit_gsheets import GSheetsConnection
+import requests
+import json
+
+# ==============================================================================
+# CONFIGURACIÓN DEL SCRIPT DE GOOGLE SHEETS
+# ==============================================================================
+URL_APPS_SCRIPT = "https://script.google.com/macros/s/AKfycbydoj6lb9MWZLRhPfKotXH0QAEwSOv8NhWL_g5gSA2N04_IQAKp0-ks33S6JxAZlBdn/exec"
 
 # ==============================================================================
 # CATÁLOGO DE PRODUCTOS
@@ -21,35 +27,30 @@ MAPA_SECCION = {f"{item['sku']} - {item['descripcion']}": item["seccion"] for it
 MAPA_SKU = {f"{item['sku']} - {item['descripcion']}": item["sku"] for item in CATALOGO}
 MAPA_DESC = {f"{item['sku']} - {item['descripcion']}": item["descripcion"] for item in CATALOGO}
 
-# Columnas exactas de tu hoja de Google Sheets
-COL_BASCULA = "Peso_Bascula_k"  # Ajusta a "Peso_Bascula_kg" si renombras la celda H1
-
 COLUMNAS = [
     "Fecha", "Hora_Registro", "Nombre", "SKU", "Descripcion", "Seccion",
-    "Peso_Guia_kg", COL_BASCULA, "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
+    "Peso_Guia_kg", "Peso_Bascula_k", "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
 ]
 
 # ==============================================================================
-# CONEXIÓN CON GOOGLE SHEETS
+# COMUNICACIÓN CON GOOGLE SHEETS
 # ==============================================================================
-conn = st.connection("gsheets", type=GSheetsConnection)
-
 def cargar_datos():
     try:
-        df = conn.read(ttl=0)
-        if df is not None and not df.empty:
-            # Asegurar que coincidan los nombres de columnas
-            for col in COLUMNAS:
-                if col not in df.columns:
-                    df[col] = None
-            return df[COLUMNAS]
+        r = requests.get(URL_APPS_SCRIPT, timeout=10)
+        if r.status_code == 200:
+            filas = r.json()
+            if len(filas) > 1:
+                df = pd.DataFrame(filas[1:], columns=filas[0])
+                for col in COLUMNAS:
+                    if col not in df.columns:
+                        df[col] = None
+                return df[COLUMNAS]
     except Exception:
         pass
     return pd.DataFrame(columns=COLUMNAS)
 
 def guardar_pesaje(fecha_sel, nombre_op, prod_str, peso_guia, peso_bascula, obs):
-    df_actual = cargar_datos()
-    
     sku = MAPA_SKU[prod_str]
     descripcion = MAPA_DESC[prod_str]
     seccion = MAPA_SECCION[prod_str]
@@ -64,7 +65,7 @@ def guardar_pesaje(fecha_sel, nombre_op, prod_str, peso_guia, peso_bascula, obs)
     else:
         estado = "Conforme"
 
-    nuevo_registro = pd.DataFrame([{
+    payload = {
         "Fecha": fecha_sel.strftime("%Y-%m-%d"),
         "Hora_Registro": datetime.now().strftime("%H:%M:%S"),
         "Nombre": nombre_op.strip(),
@@ -72,15 +73,15 @@ def guardar_pesaje(fecha_sel, nombre_op, prod_str, peso_guia, peso_bascula, obs)
         "Descripcion": descripcion,
         "Seccion": seccion,
         "Peso_Guia_kg": round(float(peso_guia), 2),
-        COL_BASCULA: round(float(peso_bascula), 2),
+        "Peso_Bascula_k": round(float(peso_bascula), 2),
         "Diferencia_kg": dif_kg,
         "Variacion_Pct": pct,
         "Estado": estado,
         "Observaciones": obs.strip() if obs else ""
-    }])
+    }
     
-    df_actualizado = pd.concat([df_actual, nuevo_registro], ignore_index=True)
-    conn.update(data=df_actualizado)
+    response = requests.post(URL_APPS_SCRIPT, data=json.dumps(payload), timeout=10)
+    return response.status_code == 200
 
 # ==============================================================================
 # INTERFAZ STREAMLIT
@@ -115,7 +116,6 @@ with col_form:
     
     with st.form("form_registro", clear_on_submit=True):
         fecha_ingreso = st.date_input("Fecha de Ingreso:", value=date.today())
-        
         nombre_personal = st.text_input("Nombre del Operador / Personal:", placeholder="Ej: Juan Pérez")
         
         producto_sel = st.selectbox("Seleccione Producto (SKU - Descripción):", options=OPCIONES_PRODUCTO)
@@ -137,22 +137,25 @@ with col_form:
                 st.error("⚠️ Ingrese pesos válidos mayores a 0.")
             else:
                 with st.spinner("Guardando en Google Sheets..."):
-                    guardar_pesaje(fecha_ingreso, nombre_personal, producto_sel, peso_guia, peso_bascula, observaciones)
-                dif = peso_bascula - peso_guia
-                pct = (dif / peso_guia) * 100
-                st.success(f"Guardado: {producto_sel} | Dif: {dif:+.2f} kg ({pct:+.2f}%)")
-                st.rerun()
+                    ok = guardar_pesaje(fecha_ingreso, nombre_personal, producto_sel, peso_guia, peso_bascula, observaciones)
+                if ok:
+                    dif = peso_bascula - peso_guia
+                    pct = (dif / peso_guia) * 100
+                    st.success(f"Guardado exitosamente: {producto_sel} | Dif: {dif:+.2f} kg ({pct:+.2f}%)")
+                    st.rerun()
+                else:
+                    st.error("No se pudo conectar con la hoja. Verifica la implementación de Apps Script.")
 
 with col_tabla:
     st.subheader("📋 Histórico Acumulado")
     
     if not df_historico.empty:
         df_historico["Peso_Guia_kg"] = pd.to_numeric(df_historico["Peso_Guia_kg"], errors="coerce").fillna(0)
-        df_historico[COL_BASCULA] = pd.to_numeric(df_historico[COL_BASCULA], errors="coerce").fillna(0)
+        df_historico["Peso_Bascula_k"] = pd.to_numeric(df_historico["Peso_Bascula_k"], errors="coerce").fillna(0)
         df_historico["Diferencia_kg"] = pd.to_numeric(df_historico["Diferencia_kg"], errors="coerce").fillna(0)
 
         total_guia = df_historico["Peso_Guia_kg"].sum()
-        total_bascula = df_historico[COL_BASCULA].sum()
+        total_bascula = df_historico["Peso_Bascula_k"].sum()
         dif_neta = total_bascula - total_guia
         pct_neta = (dif_neta / total_guia) * 100 if total_guia > 0 else 0
 
@@ -167,4 +170,4 @@ with col_tabla:
             hide_index=True
         )
     else:
-        st.info("No hay pesajes registrados todavía en la hoja.")
+        st.info("No hay pesajes registrados todavía.")
