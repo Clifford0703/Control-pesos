@@ -1,13 +1,11 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-import os
+from streamlit_gsheets import GSheetsConnection
 
 # ==============================================================================
-# CONFIGURACIÓN Y CATÁLOGO DE PRODUCTOS
+# CATÁLOGO DE PRODUCTOS
 # ==============================================================================
-DATA_FILE = "registro_pesos_historico.csv"
-
 CATALOGO = [
     {"sku": "758486", "descripcion": "PALTA MADURA EMPACADA M X KG", "seccion": "FRUTAS Y VERDURAS"},
     {"sku": "4108", "descripcion": "MANZANA AMERICANA WASHINGTON X KG", "seccion": "FRUTAS Y VERDURAS"},
@@ -23,18 +21,35 @@ MAPA_SECCION = {f"{item['sku']} - {item['descripcion']}": item["seccion"] for it
 MAPA_SKU = {f"{item['sku']} - {item['descripcion']}": item["sku"] for item in CATALOGO}
 MAPA_DESC = {f"{item['sku']} - {item['descripcion']}": item["descripcion"] for item in CATALOGO}
 
+# Columnas exactas de tu hoja de Google Sheets
+COL_BASCULA = "Peso_Bascula_k"  # Ajusta a "Peso_Bascula_kg" si renombras la celda H1
+
 COLUMNAS = [
-    "Fecha", "Hora_Registro", "SKU", "Descripcion", "Seccion",
-    "Peso_Guia_kg", "Peso_Bascula_kg", 
-    "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
+    "Fecha", "Hora_Registro", "Nombre", "SKU", "Descripcion", "Seccion",
+    "Peso_Guia_kg", COL_BASCULA, "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
 ]
 
+# ==============================================================================
+# CONEXIÓN CON GOOGLE SHEETS
+# ==============================================================================
+conn = st.connection("gsheets", type=GSheetsConnection)
+
 def cargar_datos():
-    if os.path.exists(DATA_FILE):
-        return pd.read_csv(DATA_FILE, sep=";")
+    try:
+        df = conn.read(ttl=0)
+        if df is not None and not df.empty:
+            # Asegurar que coincidan los nombres de columnas
+            for col in COLUMNAS:
+                if col not in df.columns:
+                    df[col] = None
+            return df[COLUMNAS]
+    except Exception:
+        pass
     return pd.DataFrame(columns=COLUMNAS)
 
-def guardar_pesaje(fecha_sel, prod_str, peso_guia, peso_bascula, obs):
+def guardar_pesaje(fecha_sel, nombre_op, prod_str, peso_guia, peso_bascula, obs):
+    df_actual = cargar_datos()
+    
     sku = MAPA_SKU[prod_str]
     descripcion = MAPA_DESC[prod_str]
     seccion = MAPA_SECCION[prod_str]
@@ -52,25 +67,20 @@ def guardar_pesaje(fecha_sel, prod_str, peso_guia, peso_bascula, obs):
     nuevo_registro = pd.DataFrame([{
         "Fecha": fecha_sel.strftime("%Y-%m-%d"),
         "Hora_Registro": datetime.now().strftime("%H:%M:%S"),
+        "Nombre": nombre_op.strip(),
         "SKU": sku,
         "Descripcion": descripcion,
         "Seccion": seccion,
         "Peso_Guia_kg": round(float(peso_guia), 2),
-        "Peso_Bascula_kg": round(float(peso_bascula), 2),
+        COL_BASCULA: round(float(peso_bascula), 2),
         "Diferencia_kg": dif_kg,
         "Variacion_Pct": pct,
         "Estado": estado,
         "Observaciones": obs.strip() if obs else ""
     }])
     
-    nuevo_registro.to_csv(
-        DATA_FILE, 
-        mode="a", 
-        header=not os.path.exists(DATA_FILE), 
-        index=False, 
-        sep=";", 
-        encoding="utf-8-sig"
-    )
+    df_actualizado = pd.concat([df_actual, nuevo_registro], ignore_index=True)
+    conn.update(data=df_actualizado)
 
 # ==============================================================================
 # INTERFAZ STREAMLIT
@@ -84,7 +94,6 @@ with col_titulo:
 
 df_historico = cargar_datos()
 
-# Botón de exportación en la esquina superior derecha
 with col_export:
     st.write("")
     if not df_historico.empty:
@@ -92,7 +101,7 @@ with col_export:
         st.download_button(
             label="📥 Exportar Histórico (CSV)",
             data=csv_bytes,
-            file_name=f"historico_pesajes_{date.today().strftime('%Y%m%d')}.csv",
+            file_name=f"pesajes_acumulados_{date.today().strftime('%Y%m%d')}.csv",
             mime="text/csv",
             use_container_width=True
         )
@@ -105,14 +114,11 @@ with col_form:
     st.subheader("📝 Registrar Pesaje")
     
     with st.form("form_registro", clear_on_submit=True):
-        # Fecha predeterminada de hoy pero editable
         fecha_ingreso = st.date_input("Fecha de Ingreso:", value=date.today())
         
-        # Desplegable SKU - Descripción
-        producto_sel = st.selectbox(
-            "Seleccione Producto (SKU - Descripción):", 
-            options=OPCIONES_PRODUCTO
-        )
+        nombre_personal = st.text_input("Nombre del Operador / Personal:", placeholder="Ej: Juan Pérez")
+        
+        producto_sel = st.selectbox("Seleccione Producto (SKU - Descripción):", options=OPCIONES_PRODUCTO)
         st.caption(f"📂 **Sección:** {MAPA_SECCION[producto_sel]}")
         
         c1, c2 = st.columns(2)
@@ -122,14 +128,16 @@ with col_form:
             peso_bascula = st.number_input("Peso Báscula (kg):", min_value=0.0, step=0.1, format="%.2f")
             
         observaciones = st.text_input("Observaciones:", placeholder="Opcional")
-        
         btn_guardar = st.form_submit_button("💾 Guardar Ingreso", use_container_width=True)
         
         if btn_guardar:
-            if peso_guia <= 0 or peso_bascula <= 0:
-                st.error("⚠️ Tanto el Peso Guía como el Peso Báscula deben ser mayores a 0.")
+            if not nombre_personal.strip():
+                st.error("⚠️ Por favor ingrese el nombre del operador.")
+            elif peso_guia <= 0 or peso_bascula <= 0:
+                st.error("⚠️ Ingrese pesos válidos mayores a 0.")
             else:
-                guardar_pesaje(fecha_ingreso, producto_sel, peso_guia, peso_bascula, observaciones)
+                with st.spinner("Guardando en Google Sheets..."):
+                    guardar_pesaje(fecha_ingreso, nombre_personal, producto_sel, peso_guia, peso_bascula, observaciones)
                 dif = peso_bascula - peso_guia
                 pct = (dif / peso_guia) * 100
                 st.success(f"Guardado: {producto_sel} | Dif: {dif:+.2f} kg ({pct:+.2f}%)")
@@ -139,23 +147,24 @@ with col_tabla:
     st.subheader("📋 Histórico Acumulado")
     
     if not df_historico.empty:
+        df_historico["Peso_Guia_kg"] = pd.to_numeric(df_historico["Peso_Guia_kg"], errors="coerce").fillna(0)
+        df_historico[COL_BASCULA] = pd.to_numeric(df_historico[COL_BASCULA], errors="coerce").fillna(0)
+        df_historico["Diferencia_kg"] = pd.to_numeric(df_historico["Diferencia_kg"], errors="coerce").fillna(0)
+
         total_guia = df_historico["Peso_Guia_kg"].sum()
-        total_bascula = df_historico["Peso_Bascula_kg"].sum()
+        total_bascula = df_historico[COL_BASCULA].sum()
         dif_neta = total_bascula - total_guia
-        pct_neta = (dif_neta / total_guia) * 100
+        pct_neta = (dif_neta / total_guia) * 100 if total_guia > 0 else 0
 
         m1, m2, m3 = st.columns(3)
         m1.metric("Ingresos Registrados", f"{len(df_historico)}")
         m2.metric("Total Báscula", f"{total_bascula:,.2f} kg")
-        m3.metric("Diferencia Neta Total", f"{dif_neta:+,.2f} kg", delta=f"{pct_neta:+.2f}%", delta_color="inverse")
+        m3.metric("Diferencia Neta Acumulada", f"{dif_neta:+,.2f} kg", delta=f"{pct_neta:+.2f}%", delta_color="inverse")
 
         st.dataframe(
-            df_historico.iloc[::-1][[
-                "Fecha", "SKU", "Descripcion", "Seccion", 
-                "Peso_Guia_kg", "Peso_Bascula_kg", "Diferencia_kg", "Variacion_Pct", "Estado", "Observaciones"
-            ]],
+            df_historico.iloc[::-1],
             use_container_width=True,
             hide_index=True
         )
     else:
-        st.info("No hay pesajes registrados todavía. Utilice el formulario de la izquierda.")
+        st.info("No hay pesajes registrados todavía en la hoja.")
